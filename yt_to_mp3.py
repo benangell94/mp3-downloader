@@ -58,13 +58,24 @@ def download_as_mp3(urls, output_dir: Path, bitrate: str = "192"):
 
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python yt_to_mp3.py <youtube_url> [more urls...]")
+    print("YouTube to MP3 downloader")
+    print("Enter a YouTube URL and press Enter.")
+    print("To download more than one, enter them one at a time — press Enter with nothing typed when you're done.\n")
+
+    urls = []
+    while True:
+        prompt = "YouTube URL: " if not urls else "Another URL (or press Enter to start downloading): "
+        url = input(prompt).strip()
+        if not url:
+            break
+        urls.append(url)
+
+    if not urls:
+        print("No URL entered. Exiting.")
         sys.exit(1)
 
-    urls = sys.argv[1:]
     output_dir = get_downloads_folder()
-    print(f"Saving MP3s to: {output_dir}")
+    print(f"\nSaving MP3s to: {output_dir}")
     download_as_mp3(urls, output_dir)
     print("\nDone.")
 
