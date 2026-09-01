@@ -1,0 +1,225 @@
+#!/usr/bin/env python3
+"""
+YouTube to MP3 - Desktop GUI
+
+A simple, user-friendly window app for downloading YouTube audio as MP3.
+
+Requirements:
+    pip install yt-dlp
+    ffmpeg must be installed and on your PATH
+        - macOS:   brew install ffmpeg
+        - Windows: winget install ffmpeg
+        - Linux:   sudo apt install ffmpeg
+
+Run:
+    python yt_to_mp3_gui.py
+"""
+
+import sys
+import os
+import threading
+import queue
+from pathlib import Path
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+
+try:
+    import yt_dlp
+except ImportError:
+    yt_dlp = None
+
+
+def get_downloads_folder() -> Path:
+    home = Path.home()
+    downloads = home / "Downloads"
+    downloads.mkdir(parents=True, exist_ok=True)
+    return downloads
+
+
+class YTDLLogger:
+    """Routes yt-dlp's internal messages into our GUI log queue."""
+    def __init__(self, log_queue):
+        self.log_queue = log_queue
+
+    def debug(self, msg):
+        if msg.startswith("[download]") or msg.startswith("[ExtractAudio]"):
+            self.log_queue.put(("status", msg))
+
+    def info(self, msg):
+        self.log_queue.put(("status", msg))
+
+    def warning(self, msg):
+        self.log_queue.put(("status", f"Warning: {msg}"))
+
+    def error(self, msg):
+        self.log_queue.put(("error", msg))
+
+
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("YouTube to MP3")
+        self.geometry("600x480")
+        self.minsize(520, 400)
+        self.configure(bg="#f4f4f6")
+
+        self.output_dir = get_downloads_folder()
+        self.log_queue = queue.Queue()
+        self.is_downloading = False
+
+        self._build_ui()
+        self.after(100, self._poll_log_queue)
+
+        if yt_dlp is None:
+            self._log("yt-dlp is not installed. Run: pip install yt-dlp", "error")
+            self.download_btn.config(state="disabled")
+
+    def _build_ui(self):
+        pad = {"padx": 16, "pady": 8}
+
+        title = tk.Label(self, text="YouTube to MP3", font=("Segoe UI", 18, "bold"), bg="#f4f4f6")
+        title.pack(anchor="w", **pad)
+
+        # URL input
+        url_frame = tk.Frame(self, bg="#f4f4f6")
+        url_frame.pack(fill="x", padx=16)
+        tk.Label(url_frame, text="Video URL", font=("Segoe UI", 10), bg="#f4f4f6").pack(anchor="w")
+        self.url_entry = tk.Entry(url_frame, font=("Segoe UI", 11))
+        self.url_entry.pack(fill="x", pady=(2, 0))
+        self.url_entry.bind("<Return>", lambda e: self._add_url())
+
+        add_btn = tk.Button(url_frame, text="Add to queue", command=self._add_url)
+        add_btn.pack(anchor="e", pady=(6, 0))
+
+        # Queue list
+        list_frame = tk.Frame(self, bg="#f4f4f6")
+        list_frame.pack(fill="both", expand=False, padx=16, pady=(4, 0))
+        tk.Label(list_frame, text="Queue", font=("Segoe UI", 10), bg="#f4f4f6").pack(anchor="w")
+        self.queue_listbox = tk.Listbox(list_frame, height=5, font=("Segoe UI", 9))
+        self.queue_listbox.pack(fill="x", pady=(2, 0))
+        remove_btn = tk.Button(list_frame, text="Remove selected", command=self._remove_selected)
+        remove_btn.pack(anchor="e", pady=(4, 0))
+
+        # Output folder
+        out_frame = tk.Frame(self, bg="#f4f4f6")
+        out_frame.pack(fill="x", padx=16, pady=(8, 0))
+        tk.Label(out_frame, text="Save to", font=("Segoe UI", 10), bg="#f4f4f6").pack(anchor="w")
+        path_row = tk.Frame(out_frame, bg="#f4f4f6")
+        path_row.pack(fill="x")
+        self.path_label = tk.Label(path_row, text=str(self.output_dir), anchor="w",
+                                    bg="white", relief="sunken", font=("Segoe UI", 9))
+        self.path_label.pack(side="left", fill="x", expand=True, ipady=4)
+        browse_btn = tk.Button(path_row, text="Browse...", command=self._browse_folder)
+        browse_btn.pack(side="left", padx=(6, 0))
+
+        # Download button
+        self.download_btn = tk.Button(
+            self, text="Download as MP3", font=("Segoe UI", 12, "bold"),
+            bg="#d32f2f", fg="white", activebackground="#b71c1c", activeforeground="white",
+            command=self._start_download
+        )
+        self.download_btn.pack(fill="x", padx=16, pady=12, ipady=6)
+
+        # Progress log
+        log_frame = tk.Frame(self, bg="#f4f4f6")
+        log_frame.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+        tk.Label(log_frame, text="Status", font=("Segoe UI", 10), bg="#f4f4f6").pack(anchor="w")
+        self.log_text = tk.Text(log_frame, height=8, font=("Consolas", 9), bg="#111", fg="#0f0", state="disabled")
+        self.log_text.pack(fill="both", expand=True, pady=(2, 0))
+
+    def _add_url(self):
+        url = self.url_entry.get().strip()
+        if url:
+            self.queue_listbox.insert(tk.END, url)
+            self.url_entry.delete(0, tk.END)
+
+    def _remove_selected(self):
+        selection = self.queue_listbox.curselection()
+        for i in reversed(selection):
+            self.queue_listbox.delete(i)
+
+    def _browse_folder(self):
+        folder = filedialog.askdirectory(initialdir=str(self.output_dir))
+        if folder:
+            self.output_dir = Path(folder)
+            self.path_label.config(text=str(self.output_dir))
+
+    def _log(self, msg, tag="status"):
+        self.log_text.config(state="normal")
+        self.log_text.insert(tk.END, msg.strip() + "\n")
+        self.log_text.see(tk.END)
+        self.log_text.config(state="disabled")
+
+    def _poll_log_queue(self):
+        try:
+            while True:
+                tag, msg = self.log_queue.get_nowait()
+                self._log(msg, tag)
+        except queue.Empty:
+            pass
+        self.after(100, self._poll_log_queue)
+
+    def _start_download(self):
+        if self.is_downloading:
+            return
+
+        # Include whatever is still typed in the box, plus the queued items
+        pending_text = self.url_entry.get().strip()
+        urls = list(self.queue_listbox.get(0, tk.END))
+        if pending_text:
+            urls.append(pending_text)
+
+        if not urls:
+            messagebox.showwarning("No URL", "Enter at least one YouTube URL first.")
+            return
+
+        self.is_downloading = True
+        self.download_btn.config(state="disabled", text="Downloading...")
+        self.log_queue.put(("status", f"Starting {len(urls)} download(s)..."))
+
+        thread = threading.Thread(target=self._download_worker, args=(urls,), daemon=True)
+        thread.start()
+
+    def _download_worker(self, urls):
+        ydl_opts = {
+            "format": "bestaudio/best",
+            "outtmpl": str(self.output_dir / "%(title)s.%(ext)s"),
+            "postprocessors": [
+                {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}
+            ],
+            "noplaylist": True,
+            "logger": YTDLLogger(self.log_queue),
+            "progress_hooks": [self._progress_hook],
+        }
+
+        success_count = 0
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                for url in urls:
+                    try:
+                        self.log_queue.put(("status", f"\n--- Downloading: {url} ---"))
+                        ydl.download([url])
+                        success_count += 1
+                    except Exception as e:
+                        self.log_queue.put(("error", f"Failed: {url} ({e})"))
+        finally:
+            self.log_queue.put(("status", f"\nFinished. {success_count}/{len(urls)} succeeded."))
+            self.after(0, self._reset_ui)
+
+    def _progress_hook(self, d):
+        if d["status"] == "downloading":
+            pct = d.get("_percent_str", "").strip()
+            speed = d.get("_speed_str", "").strip()
+            self.log_queue.put(("status", f"  {pct} at {speed}"))
+        elif d["status"] == "finished":
+            self.log_queue.put(("status", "  Converting to MP3..."))
+
+    def _reset_ui(self):
+        self.is_downloading = False
+        self.download_btn.config(state="normal", text="Download as MP3")
+        self.queue_listbox.delete(0, tk.END)
+
+
+if __name__ == "__main__":
+    app = App()
+    app.mainloop()
